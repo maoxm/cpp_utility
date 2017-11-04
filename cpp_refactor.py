@@ -2,6 +2,8 @@
 
 import os, glob, subprocess, sys, re, shutil
 import common
+import cpp_partial_parser
+import pprint
 
 TYPES = ["void", "int", "bool", "double", "float"]
 RE_MATCH_CLASS = "^class (\S+)(.*){"
@@ -274,19 +276,32 @@ def main():
 
   file_path = sys.argv[1]
   cc_functions = {}
-  header_functions = {}
-  header_file = ""
+  header_functions = []
+  header_file = None
   with open(file_path, "r") as fin:
     (google3_dir, dummy) = common.find_google3_path(file_path)
     header_file = google3_dir + "/" + find_header_file(fin)
-    [class_name, header_functions] = process_header_file(header_file)
 
-    # process reset of cc file
-    ff = FunctionFinder(TYPES, class_name, True)
-    for line in fin:
-      if ff.accumulate_current_fuction(line):
-        result = ff.consume_curr_fun()
-        cc_functions[result[0]] = result[1]
+  header_lines = []
+  with open(header_file, "r") as fheader:
+    header_lines = fheader.readlines()
+
+  # We only support the first class for now
+  class_info = cpp_partial_parser.parse_classes(header_lines)[0]
+  class_name = class_info[0]
+  print "INFO: class name:", class_name
+  header_functions = cpp_partial_parser.parse_functions(class_info[1])
+  pp = pprint.PrettyPrinter(indent=4)
+  pp.pprint(header_functions)
+
+  return
+
+  # process reset of cc file
+  ff = FunctionFinder(TYPES, class_name, True)
+  for line in fin:
+    if ff.accumulate_current_fuction(line):
+      result = ff.consume_curr_fun()
+      cc_functions[result[0]] = result[1]
 
   if DEBUG:
     print "Info cc file function definition:\n", cc_functions
