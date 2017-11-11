@@ -6,7 +6,10 @@ import re, unittest
 
 COMMON_EXCLUDE_PAIRS = [("{", "}"), ("(", ")"), ("<", ">")]
 
+DEBUG = False
 
+
+# NOte: cannot find "<<" as it will be skipped
 class Parser(object):
 
   def __init__(self, lines):
@@ -48,6 +51,8 @@ class Parser(object):
     comment_exclude_list = [["/*", "*/"], ["//", "\n"]]
     for i in range(self.next_i, total_len):
       curr_line = self.lines[i]
+      if DEBUG:
+        print "curr line: ", targets, excluding, curr_line
 
       # Handle comments
       if curr_line.strip().startswith("//"):
@@ -62,9 +67,15 @@ class Parser(object):
         start_j = self.next_j
       else:
         start_j = 0
-      for j in range(start_j, len(curr_line)):
+      j = start_j - 1
+      while j < len(curr_line) - 1:
+        # Increment first to deal with "continue"
+        j += 1
         if comment_on == False:
           # process only if it is not comment
+          if j < len(curr_line) - 2 and curr_line[j:j + 3] == "<< ":
+            j += 2
+            continue
           for target in targets:
             next_j = j + len(target)
             if len(excluding) == 0 and curr_line[j:next_j] == target:
@@ -110,9 +121,17 @@ def parse_classes(lines):
     (end_i, j) = parser.find("}", COMMON_EXCLUDE_PAIRS)
     result_lines = lines[start_i:end_i + 1]
     result_lines[0] = result_lines[0][start_j:]
-    result.append([class_name, result_lines])
+    result.append([class_name, result_lines, start_i])
 
   return result
+
+
+def find_public_line(lines, class_offset):
+  parser = Parser(lines)
+  parser.set_start_pos(class_offset + 1, 0)
+  pos = parser.find("public:", COMMON_EXCLUDE_PAIRS)
+  assert pos is not None
+  return pos
 
 
 # including the starting char, excluding end char
@@ -168,6 +187,8 @@ def parse_functions(lines, class_name=None):
     if class_name is not None and not name.startswith(class_name + "::"):
       continue
 
+    if DEBUG:
+      print "Found function line: ", line
     f["name"] = remove_class_name(name, class_name)
     if len(words) > 1:
       f["return"] = remove_class_name(words[-2], class_name)
@@ -187,7 +208,15 @@ def parse_functions(lines, class_name=None):
     def_i, def_j = pos_def_end
     suffix = get_string_from_lines(lines, sig_i, sig_j + 1, def_i,
                                    def_j).strip()
-    f["suffix"] = suffix
+
+    # If starts with ":", which should only happen in constructors
+    if not suffix.startswith(":"):
+      f["suffix"] = suffix
+
+    # if suffix has "default", it is probably something like
+    # "A(A&& a) = default;", skip it
+    if "default" in suffix:
+      continue
 
     # If it is just declearation, we are done
     if lines[def_i][def_j] == ";":
@@ -196,7 +225,9 @@ def parse_functions(lines, class_name=None):
       continue
 
     # process body in case in header file
-    pos_body_end = parser.find("}", COMMON_EXCLUDE_PAIRS)
+    pos_body_end = parser.find("}", [["(", ")"], ["{", "}"]])
+    if DEBUG:
+      print "Found functon end now"
     if class_name is None:
       # skip this function as it as body in header file
       continue
@@ -257,15 +288,14 @@ class TestAll(unittest.TestCase):
     self.assertEqual(Parser(["abc\n", "bbb\n"]).find("bcd"), None)
 
     # comments on same line
-    print ">>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<"
     self.assertEqual(
         Parser(["int a; // range [1,5)  ok "]).find("b", [["(", ")"]]), None)
-    print ">>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<"
+    self.assertEqual(Parser(["<< abc"]).find("abc", [["<", ">"]]), [0, 3])
 
   def test_find_class(self):
     self.assertEqual(
         parse_classes(["class a {\n", " //dummy\n", "};\n"]),
-        [["a", ["{\n", " //dummy\n", "};\n"]]])
+        [["a", ["{\n", " //dummy\n", "};\n"], 0]])
     self.assertEqual(
         parse_classes("""class a {
  //dummy
@@ -277,16 +307,27 @@ class b {
 Other function
 void f1() { reutrn ; }
 """.splitlines(True)),
-        [["a", ["{\n", " //dummy\n", "};\n"]],
+        [["a", ["{\n", " //dummy\n", "};\n"], 0],
          ["b", [
              "{\n",
              " //dummy\n",
              " void m1() { return; }\n",
              "};\n",
-         ]]])
+         ], 3]])
     self.assertEqual(
         parse_classes(["class a : b {\n", " //dummy\n", "};\n"]),
-        [["a", ["{\n", " //dummy\n", "};\n"]]])
+        [["a", ["{\n", " //dummy\n", "};\n"], 0]])
+
+  def test_find_public_line(self):
+    self.assertEqual(
+        find_public_line("""class A {
+  class B {
+   public:
+      void OK();
+  };
+ public: // <<<< this should be the line found "public"
+  void m2();
+                         };""".splitlines(True), 0), [5, 1])
 
   def test_parse_sig(self):
     self.assertEqual(parse_sig("()"), [])
@@ -342,6 +383,18 @@ void f1() { reutrn ; }
                               "sig": [],
                           }])
 
+    # Test constructor with member data initialiation
+    self.assertEqual(
+        parse_functions("""MyC::MyC() : member_(5) {
+                        }""".splitlines(True), "MyC"), [{
+                            "range": [0, 1],
+                            "name": "MyC",
+                            "return": "",
+                            "prefix": "",
+                            "suffix": "",
+                            "sig": [],
+                        }])
+
     # header file with function body
     self.assertEqual(
         parse_functions("""void f1() {
@@ -364,6 +417,30 @@ return;
     "suffix": "const",
     "sig": [["T2 a", None]],
 }])
+
+    # Test body has "<"
+    self.assertEqual(
+        parse_functions("""void MyC::Add() {
+                        for (int i = 0; i < 5; i++) {
+                          //haha
+                        }
+                        }""".splitlines(True), "MyC"), [{
+                            "range": [0, 4],
+                            "name": "Add",
+                            "return": "void",
+                            "prefix": "",
+                            "suffix": "",
+                            "sig": [],
+                        }])
+
+    # Test header file default function
+    self.assertEqual(
+        parse_functions("""MyC(MyC&& rhs) = default; """.splitlines(True)), [])
+
+  # The test method for debug only
+  def test_debug(self):
+
+    pass
 
 
 if __name__ == "__main__":
